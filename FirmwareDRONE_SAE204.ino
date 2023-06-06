@@ -24,7 +24,7 @@ IPAddress gateway(192, 168, 1, 1);
 IPAddress subnet(255, 255, 255, 0);
 
 // MOTOR PWM MANAGER VAR PART
-// use first channel of 16 channels (started from zero)
+// use firsts channels of 16 channels (started from zero)
 #define RIGHT_MOTOR_CHANNEL 0
 #define LEFT_MOTOR_CHANNEL 1
 #define DOWN_MOTOR_CHANNEL 2
@@ -36,11 +36,11 @@ IPAddress subnet(255, 255, 255, 0);
 // use 5000 Hz as a LEDC base frequency
 #define LEDC_BASE_FREQ 5000
 
-// fade LED PIN (replace with LED_BUILTIN constant for built-in LED)
-#define RIGHT_MOTOR_PIN D3 // connected to D2
-#define LEFT_MOTOR_PIN  A1 // connected to A0
-#define DOWN_MOTOR_PIN  D5 // connected to D4
-#define UP_MOTOR_PIN    A5 // connected to A4
+// motors PIN
+#define RIGHT_MOTOR_PIN    D4
+#define LEFT_MOTOR_PIN     A0
+#define DOWN_MOTOR_PIN     D2
+#define UP_MOTOR_PIN       A5
 
 // Arduino like analogWrite
 // value has to be between 0 and valueMax
@@ -111,13 +111,6 @@ void setup() {
     while (1);
   }
 
-  // Init motor tension manager
-  pinMode(A0, OUTPUT);
-  digitalWrite(A0, LOW);
-  pinMode(D4, OUTPUT);
-  digitalWrite(D4, LOW);
-  // ....
-
   // Setup timer and attach timer to a motor pin
   ledcSetup(RIGHT_MOTOR_CHANNEL, LEDC_BASE_FREQ, LEDC_TIMER_13_BIT);
   ledcAttachPin(RIGHT_MOTOR_PIN, RIGHT_MOTOR_CHANNEL);
@@ -164,28 +157,18 @@ float right_turn = 0.0;
 float left_turn = 0.0;
 bool idle = false;
 
-float motors_speed = 0.5;
+float motors_speed = 0.6;
 
 float up_motor_speed_variation = 0.0;
 float down_motor_speed_variation = 0.0;
 float right_motor_speed_variation = 0.0;
 float left_motor_speed_variation = 0.0;
-float heigth_motor_speed_variation = 0.0;
 
 void stabilize(int wantedRoll, int wantedPitch, int wantedHeading) {
   up_motor_speed_variation = 0.0;
   down_motor_speed_variation = 0.0;
   right_motor_speed_variation = 0.0;
   left_motor_speed_variation = 0.0;
-  heigth_motor_speed_variation=(current_Z_Acceleration-9);
-
-
-  if (up!=0.0){
-    heigth_motor_speed_variation = up;
-  }
-  if (down!=0.0){
-    heigth_motor_speed_variation = down;
-  }
 
   if (currentRoll > wantedRoll ) {
     // penche trop vers la gauche
@@ -225,37 +208,10 @@ void stabilize(int wantedRoll, int wantedPitch, int wantedHeading) {
     down_motor_speed_variation = correct_intensity;
   }
 
-
-
-  ledcAnalogWrite(UP_MOTOR_CHANNEL, (int)(max((float)0, min(motors_speed + up_motor_speed_variation+heigth_motor_speed_variation, (float)1)) * 255.0));
-  ledcAnalogWrite(DOWN_MOTOR_CHANNEL, (int)(max((float)0, min(motors_speed + down_motor_speed_variation+heigth_motor_speed_variation, (float)1)) * 255.0));
-  ledcAnalogWrite(LEFT_MOTOR_CHANNEL, (int)(max((float)0, min(motors_speed + left_motor_speed_variation+heigth_motor_speed_variation, (float)1)) * 255.0));
-  ledcAnalogWrite(RIGHT_MOTOR_CHANNEL, (int)(max((float)0, min(motors_speed + right_motor_speed_variation+heigth_motor_speed_variation, (float)1)) * 255.0));
-  
-
-  //Serial.print(" Pitch: "); 
-  //Serial.print(currentPitch);
-  //Serial.print(" wantedPitch: ");
-  //Serial.print(wantedPitch);
-  //Serial.print(" Roll: "); 
-  //Serial.print(currentRoll);
-  //Serial.print(" wantedRoll: ");
-  //Serial.print(wantedRoll);
-  Serial.print("Acceleration_z: ");
-  Serial.print(-heigth_motor_speed_variation);
-  Serial.print("\tUp: ");
-  Serial.print(up);
-  Serial.print("\tDown: ");
-  Serial.print(down);
-  Serial.print("\tforward:"); 
-  Serial.print(motors_speed + up_motor_speed_variation+heigth_motor_speed_variation);
-  Serial.print("\tbackward"); 
-  Serial.print(motors_speed + down_motor_speed_variation+heigth_motor_speed_variation);
-  Serial.print("\tright:"); 
-  Serial.print(motors_speed + left_motor_speed_variation+heigth_motor_speed_variation);
-  Serial.print("\tleft"); 
-  Serial.print(motors_speed + right_motor_speed_variation+heigth_motor_speed_variation);
-  Serial.println();
+  ledcAnalogWrite(UP_MOTOR_CHANNEL, (int)(max((float)0, min(motors_speed + up_motor_speed_variation, (float)1)) * 255.0));
+  ledcAnalogWrite(DOWN_MOTOR_CHANNEL, (int)(max((float)0, min(motors_speed + down_motor_speed_variation, (float)1)) * 255.0));
+  ledcAnalogWrite(LEFT_MOTOR_CHANNEL, (int)(max((float)0, min(motors_speed + left_motor_speed_variation, (float)1)) * 255.0));
+  ledcAnalogWrite(RIGHT_MOTOR_CHANNEL, (int)(max((float)0, min(motors_speed + right_motor_speed_variation, (float)1)) * 255.0));
 }
 
 
@@ -344,46 +300,13 @@ void loop() {
 
   }
 
-  if (Start=false){
+  if (Start=false || abs(currentRoll) > 30 || abs(currentPitch) > 30){
     ledcAnalogWrite(UP_MOTOR_CHANNEL, 0);
     ledcAnalogWrite(DOWN_MOTOR_CHANNEL, 0);
     ledcAnalogWrite(LEFT_MOTOR_CHANNEL, 0);
     ledcAnalogWrite(RIGHT_MOTOR_CHANNEL, 0); 
   }else{// motor action
     stabilize(wantedRoll,wantedPitch,wantedHeading);
-   }
- 
-  
-  
-
-  //
-  if (millis() - lastTimePrint > 10000) {
-    Serial.print("idle:");
-    Serial.print(idle);
-    Serial.print(" forward:");
-    Serial.print(forward);
-    Serial.print(" backward:");
-    Serial.print(backward);
-    Serial.print(" right:");
-    Serial.print(right);
-    Serial.print(" left:");
-    Serial.print(left);
-    Serial.print(" up:");
-    Serial.print(up);
-    Serial.print(" down:");
-    Serial.print(down);
-    Serial.print(" right_turn:");
-    Serial.print(right_turn);
-    Serial.print(" left_turn:");
-    Serial.print(left_turn);
-    Serial.print(" roll:");
-    Serial.print(currentRoll);
-    Serial.print(" pitch:");
-    Serial.print(currentPitch);
-    Serial.print(" heading:");
-    Serial.print(currentHeading);
-    Serial.println();
-    lastTimePrint = millis();
   }
 
   if (millis() - lastTime > 1000) {
