@@ -1,54 +1,398 @@
 #include "WiFi.h"
 #include "AsyncUDP.h"
 #include "string"
+#include "FeatherShieldPinouts.h"
+#include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BNO055.h>
+#include <utility/imumaths.h>
 
+// GYROSCOPE VAR PART
+Adafruit_BNO055 orientDevice = Adafruit_BNO055(55, 0x28, &Wire);
+int currentRoll = 0; // in degres
+int currentPitch = 0; // in degres
+int currentHeading = 0; // in degres
+int current_Z_Acceleration = 0; //in  m/s^2
+
+// UDP SERVER VAR PART
 const char* ssid = "Dronator2000";
-const char* password = "12345678";
-
+const char* password = "123456789";
 AsyncUDP udp;
-
 #define PORT 1234
 IPAddress local_ip(192, 168, 1, 1);
 IPAddress gateway(192, 168, 1, 1);
 IPAddress subnet(255, 255, 255, 0);
 
-void setup()
-{
-    Serial.begin(115200);
-    WiFi.softAP(ssid, password);
-    WiFi.softAPConfig(local_ip, gateway, subnet);
+// MOTOR PWM MANAGER VAR PART
+// use first channel of 16 channels (started from zero)
+#define RIGHT_MOTOR_CHANNEL 0
+#define LEFT_MOTOR_CHANNEL 1
+#define DOWN_MOTOR_CHANNEL 2
+#define UP_MOTOR_CHANNEL 3
 
-    if(udp.listen(PORT)) {
-        Serial.print("UDP Listening on IP: ");
-        Serial.println(local_ip);
-        Serial.print("UDP Listening on port: ");
-        Serial.println(PORT);
-        udp.onPacket([](AsyncUDPPacket packet) {
-            Serial.print("Data received: ");
-            Serial.write(packet.data(), packet.length());
-            Serial.println();
-        });
-    }
+// use 13 bit precission for LEDC timer
+#define LEDC_TIMER_13_BIT 13
+
+// use 5000 Hz as a LEDC base frequency
+#define LEDC_BASE_FREQ 5000
+
+// fade LED PIN (replace with LED_BUILTIN constant for built-in LED)
+#define RIGHT_MOTOR_PIN D3 // connected to D2
+#define LEFT_MOTOR_PIN  A1 // connected to A0
+#define DOWN_MOTOR_PIN  D5 // connected to D4
+#define UP_MOTOR_PIN    A5 // connected to A4
+
+// Arduino like analogWrite
+// value has to be between 0 and valueMax
+void ledcAnalogWrite(uint8_t channel, uint32_t value, uint32_t valueMax = 255) {
+  // calculate duty, 8191 from 2 ^ 13 - 1
+  uint32_t duty = (8191 / valueMax) * min(value, valueMax);
+
+  // write duty to LEDC
+  ledcWrite(channel, duty);
 }
 
-int i = 0;
-void loop()
-{
-    delay(100);
-    //Send broadcast
+bool startWith(char* input, char* match) {
+  if (strlen(input) < strlen(match)) {
+    return false;
+  }
+
+  for (int i = 0; i < strlen(match); i++) {
+    if (input[i] != match[i]) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+float x_LeftJoystick = 0.0;
+float y_LeftJoystick = 0.0;
+float x_RightJoystick = 0.0;
+float y_RightJoystick = 0.0;
+unsigned long lastTime;
+void updateControls(char* data) {
+  strtok(data, ";");
+  x_LeftJoystick = atof(strtok(NULL, ";"));
+  y_LeftJoystick = atof(strtok(NULL, ";"));
+  x_RightJoystick = atof(strtok(NULL, ";"));
+  y_RightJoystick = atof(strtok(NULL, ";"));
+  lastTime = millis();
+}
+
+bool Start = false;
+void updateMode(char* data) {
+  strtok(data, ";");
+  Start = (bool)atof(strtok(NULL, ";"));
+}
+
+
+void updatePos() {
+  // get acceleration
+  sensors_event_t orientationData,accelerometerData;
+  orientDevice.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER);
+  
+  currentRoll = (int)(orientationData.orientation.y);
+  currentPitch = (int)(orientationData.orientation.z);
+  currentHeading = (int)(orientationData.orientation.x);
+
+  orientDevice.getEvent(&accelerometerData, Adafruit_BNO055::VECTOR_ACCELEROMETER);
+  current_Z_Acceleration = (int)(accelerometerData.acceleration.z);
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  /* Initialise the sensor */
+  if (!orientDevice.begin())
+  {
+    /* There was a problem detecting the BNO055 ... check your connections */
+    Serial.print("Ooops, no BNO055 detected ... Check your wiring or I2C ADDR!");
+    while (1);
+  }
+
+  // Init motor tension manager
+  pinMode(A0, OUTPUT);
+  digitalWrite(A0, LOW);
+  pinMode(D4, OUTPUT);
+  digitalWrite(D4, LOW);
+  // ....
+
+  // Setup timer and attach timer to a motor pin
+  ledcSetup(RIGHT_MOTOR_CHANNEL, LEDC_BASE_FREQ, LEDC_TIMER_13_BIT);
+  ledcAttachPin(RIGHT_MOTOR_PIN, RIGHT_MOTOR_CHANNEL);
+  ledcSetup(LEFT_MOTOR_CHANNEL, LEDC_BASE_FREQ, LEDC_TIMER_13_BIT);
+  ledcAttachPin(LEFT_MOTOR_PIN, LEFT_MOTOR_CHANNEL);
+  ledcSetup(DOWN_MOTOR_CHANNEL, LEDC_BASE_FREQ, LEDC_TIMER_13_BIT);
+  ledcAttachPin(DOWN_MOTOR_PIN, DOWN_MOTOR_CHANNEL);
+  ledcSetup(UP_MOTOR_CHANNEL, LEDC_BASE_FREQ, LEDC_TIMER_13_BIT);
+  ledcAttachPin(UP_MOTOR_PIN, UP_MOTOR_CHANNEL);
+
+  // Setup WIFI Acces Point
+  WiFi.setSleep(false);
+  WiFi.softAP(ssid, password);
+  WiFi.softAPConfig(local_ip, gateway, subnet);
+
+  // Setup UDP Server
+  if (udp.listen(PORT)) {
+    Serial.print("UDP Listening on IP: ");
+    Serial.println(local_ip);
+    Serial.print("UDP Listening on port: ");
+    Serial.println(PORT);
+    udp.onPacket([](AsyncUDPPacket packet) {
+      // When a packet is received
+      char* data = (char*)(packet.data());
+      if (startWith(data, "JOY_DATA;")) {
+        updateControls(data);
+      }
+      if (startWith(data, "SET_MODE;")) {
+        updateMode(data);
+      }
+    });
+  }
+}
+
+float deadZone = 0.25;
+
+float forward = 0.0;
+float backward = 0.0;
+float right = 0.0;
+float left = 0.0;
+float up = 0.0;
+float down = 0.0;
+float right_turn = 0.0;
+float left_turn = 0.0;
+bool idle = false;
+
+float motors_speed = 0.5;
+
+float up_motor_speed_variation = 0.0;
+float down_motor_speed_variation = 0.0;
+float right_motor_speed_variation = 0.0;
+float left_motor_speed_variation = 0.0;
+float heigth_motor_speed_variation = 0.0;
+
+void stabilize(int wantedRoll, int wantedPitch, int wantedHeading) {
+  up_motor_speed_variation = 0.0;
+  down_motor_speed_variation = 0.0;
+  right_motor_speed_variation = 0.0;
+  left_motor_speed_variation = 0.0;
+  heigth_motor_speed_variation=(current_Z_Acceleration-9);
+
+
+  if (up!=0.0){
+    heigth_motor_speed_variation = up;
+  }
+  if (down!=0.0){
+    heigth_motor_speed_variation = down;
+  }
+
+  if (currentRoll > wantedRoll ) {
+    // penche trop vers la gauche
+
+    // intensité de correction
+    float correct_intensity = abs(currentRoll - wantedRoll) / 30.0;
+
+    left_motor_speed_variation = correct_intensity;
+    right_motor_speed_variation = -correct_intensity;
+  }
+  if (currentRoll < wantedRoll ) {
+    // penche trop vers la droite
+
+    // intensité de correction
+    float correct_intensity = abs(currentRoll - wantedRoll ) / 30.0;
+
+    left_motor_speed_variation = -correct_intensity;
+    right_motor_speed_variation = correct_intensity;
+  }
+
+  if (currentPitch > wantedPitch ) {
+    // penche trop vers en avant
+
+    // intensité de correction
+    float correct_intensity = abs(currentPitch - wantedPitch ) / 30.0;
+
+    up_motor_speed_variation = correct_intensity;
+    down_motor_speed_variation = -correct_intensity;
+  }
+  if (currentPitch < wantedPitch ) {
+    // penche trop en arrière
+
+    // intensité de correction
+    float correct_intensity = abs(currentPitch - wantedPitch ) / 30.0;
+
+    up_motor_speed_variation = -correct_intensity;
+    down_motor_speed_variation = correct_intensity;
+  }
+
+
+
+  ledcAnalogWrite(UP_MOTOR_CHANNEL, (int)(max((float)0, min(motors_speed + up_motor_speed_variation+heigth_motor_speed_variation, (float)1)) * 255.0));
+  ledcAnalogWrite(DOWN_MOTOR_CHANNEL, (int)(max((float)0, min(motors_speed + down_motor_speed_variation+heigth_motor_speed_variation, (float)1)) * 255.0));
+  ledcAnalogWrite(LEFT_MOTOR_CHANNEL, (int)(max((float)0, min(motors_speed + left_motor_speed_variation+heigth_motor_speed_variation, (float)1)) * 255.0));
+  ledcAnalogWrite(RIGHT_MOTOR_CHANNEL, (int)(max((float)0, min(motors_speed + right_motor_speed_variation+heigth_motor_speed_variation, (float)1)) * 255.0));
+  
+
+  //Serial.print(" Pitch: "); 
+  //Serial.print(currentPitch);
+  //Serial.print(" wantedPitch: ");
+  //Serial.print(wantedPitch);
+  //Serial.print(" Roll: "); 
+  //Serial.print(currentRoll);
+  //Serial.print(" wantedRoll: ");
+  //Serial.print(wantedRoll);
+  Serial.print("Acceleration_z: ");
+  Serial.print(-heigth_motor_speed_variation);
+  Serial.print("\tUp: ");
+  Serial.print(up);
+  Serial.print("\tDown: ");
+  Serial.print(down);
+  Serial.print("\tforward:"); 
+  Serial.print(motors_speed + up_motor_speed_variation+heigth_motor_speed_variation);
+  Serial.print("\tbackward"); 
+  Serial.print(motors_speed + down_motor_speed_variation+heigth_motor_speed_variation);
+  Serial.print("\tright:"); 
+  Serial.print(motors_speed + left_motor_speed_variation+heigth_motor_speed_variation);
+  Serial.print("\tleft"); 
+  Serial.print(motors_speed + right_motor_speed_variation+heigth_motor_speed_variation);
+  Serial.println();
+}
+
+
+unsigned long lastTimePrint = 0;
+void loop() {
+  // get data from gyroscope
+  updatePos();
+
+
+  forward = 0.0;
+  backward = 0.0;
+  right = 0.0;
+  left = 0.0;
+  up = 0.0;
+  down = 0.0;
+  right_turn = 0.0;
+  left_turn = 0.0;
+  idle = true;
+
+  // in degres
+  int wantedRoll = 0;
+  int wantedPitch = 0;
+  int wantedHeading = 0;
+
+  // manage forward and backward
+  if (y_LeftJoystick > deadZone) {
+    // going forward
+    forward = y_LeftJoystick;
+    idle = false;
+
+    wantedPitch = y_LeftJoystick * 30;
+  }
+  if (y_LeftJoystick < -deadZone) {
+    // going backward
+    backward = y_LeftJoystick;
+    idle = false;
+
+    wantedPitch = y_LeftJoystick * 30;
+  }
+
+  // manage left and right
+  if (x_LeftJoystick > deadZone) {
+    // going right
+    right = x_LeftJoystick;
+    idle = false;
+
+    wantedRoll = -x_LeftJoystick * 30;
+  }
+  if (x_LeftJoystick < -deadZone) {
+    // going left
+    left = -x_LeftJoystick;
+    idle = false;
+
+    wantedRoll = -x_LeftJoystick * 30;
+  }
+
+  // manage up and dowm
+  if (y_RightJoystick > deadZone) {
+    // going up
+    up = y_RightJoystick;
+    idle = false;
+
     
-    const String text = "ping " + String(i);
+  }
+  if (y_RightJoystick < -deadZone) {
+    // going down
+    down = y_RightJoystick;
+    idle = false;
 
-    const int length = text.length();
+    
+  }
+
+  // manage rotation
+  if (x_RightJoystick > deadZone) {
+    // turning right
+    right_turn = x_RightJoystick;
+    idle = false;
+
+
+  }
+  if (x_RightJoystick < -deadZone) {
+    // turning left
+    left_turn = x_RightJoystick;
+    idle = false;
+
+
+  }
+
+  if (Start=false){
+    ledcAnalogWrite(UP_MOTOR_CHANNEL, 0);
+    ledcAnalogWrite(DOWN_MOTOR_CHANNEL, 0);
+    ledcAnalogWrite(LEFT_MOTOR_CHANNEL, 0);
+    ledcAnalogWrite(RIGHT_MOTOR_CHANNEL, 0); 
+  }else{// motor action
+    stabilize(wantedRoll,wantedPitch,wantedHeading);
+   }
+ 
   
-    // declaring character array (+1 for null terminator)
-    char* char_array = new char[length + 1];
   
-    // copying the contents of the
-    // string to char array
-    strcpy(char_array, text.c_str());
 
+  //
+  if (millis() - lastTimePrint > 10000) {
+    Serial.print("idle:");
+    Serial.print(idle);
+    Serial.print(" forward:");
+    Serial.print(forward);
+    Serial.print(" backward:");
+    Serial.print(backward);
+    Serial.print(" right:");
+    Serial.print(right);
+    Serial.print(" left:");
+    Serial.print(left);
+    Serial.print(" up:");
+    Serial.print(up);
+    Serial.print(" down:");
+    Serial.print(down);
+    Serial.print(" right_turn:");
+    Serial.print(right_turn);
+    Serial.print(" left_turn:");
+    Serial.print(left_turn);
+    Serial.print(" roll:");
+    Serial.print(currentRoll);
+    Serial.print(" pitch:");
+    Serial.print(currentPitch);
+    Serial.print(" heading:");
+    Serial.print(currentHeading);
+    Serial.println();
+    lastTimePrint = millis();
+  }
 
-    udp.broadcast(char_array);
-    i++;
+  if (millis() - lastTime > 1000) {
+    // TIMEOUT (after 1s of inactivity) : connection lost
+    x_LeftJoystick = 0;
+    y_LeftJoystick = 0;
+    x_RightJoystick = 0;
+    y_RightJoystick = 0;
+  }
+
+  delay(10);
 }
